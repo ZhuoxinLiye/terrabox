@@ -32,6 +32,57 @@ def _rasterio_numpy():
     return rasterio, np
 
 
+def _normalise_class_table(value: Any) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Accept the public class-table forms and turn malformed input into data."""
+    raw = value
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            return [], {"reason_code": "invalid_class_table", "details": f"invalid JSON: {exc.msg}"}
+    if isinstance(raw, dict):
+        # A wrapped table is convenient for JSON tool callers; a value->label
+        # mapping is kept compatible with the earlier demo request shape.
+        raw = raw.get("classes", raw)
+        if isinstance(raw, dict):
+            entries = []
+            for key, item in raw.items():
+                if isinstance(item, dict):
+                    entry = dict(item)
+                    entry.setdefault("value", key)
+                else:
+                    entry = {"value": key, "name": str(item)}
+                entries.append(entry)
+            raw = entries
+    if not isinstance(raw, list):
+        return [], {"reason_code": "invalid_class_table", "details": "expected an array or value-to-label object"}
+    entries: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict) or "value" not in item:
+            return [], {"reason_code": "invalid_class_table", "details": f"entry {index} must contain value and name"}
+        try:
+            numeric = int(item["value"])
+        except (TypeError, ValueError, OverflowError):
+            return [], {"reason_code": "invalid_class_table", "details": f"entry {index} has a non-integer value"}
+        if isinstance(item["value"], bool) or (isinstance(item["value"], float) and item["value"] != numeric):
+            return [], {"reason_code": "invalid_class_table", "details": f"entry {index} has a non-integer value"}
+        if numeric in seen:
+            return [], {"reason_code": "invalid_class_table", "details": f"duplicate class value {numeric}"}
+        # ``name`` is the stable public field.  Treat a title-only entry as a
+        # malformed table instead of silently accepting a display-only field;
+        # this makes caller mistakes visible before raster values are checked.
+        name = item.get("name")
+        if not isinstance(name, str) or not name.strip():
+            return [], {"reason_code": "invalid_class_table", "details": f"entry {index} needs a non-empty name"}
+        entry = dict(item)
+        entry["value"] = numeric
+        entry["name"] = name.strip()
+        seen.add(numeric)
+        entries.append(entry)
+    return entries, None
+
+
 def _profile(src) -> dict[str, Any]:
     return {
         "width": src.width,
@@ -177,6 +228,74 @@ def raster_profile_preflight_handler(arguments: dict, context: Any, account: Any
     )
 
 
+def align_raster_handler(arguments: dict, context: Any, account: Any) -> dict[str, Any]:
+    """Resample one raster onto a declared target grid for categorical analysis."""
+    rasterio, np = _rasterio_numpy()
+    from rasterio.warp import Resampling, reproject
+
+    source_path = arguments["source_path"]
+    target_path = arguments["target_path"]
+    output_path = arguments["output_path"]
+    method = str(arguments.get("resampling") or "nearest").lower()
+    if method != "nearest":
+        return _blocked("unsupported_resampling", resampling=method, supported_resampling=["nearest"])
+    with rasterio.open(source_path) as source, rasterio.open(target_path) as target:
+        if source.count != 1 or target.count != 1:
+            return _blocked("unsupported_band_count", source_count=source.count, target_count=target.count)
+        source_profile = _profile(source)
+        target_profile = _profile(target)
+        source_nodata = source.nodata
+        destination_nodata = arguments.get("dst_nodata")
+        if destination_nodata is None:
+            destination_nodata = source_nodata if source_nodata is not None else 255
+        dtype = np.dtype(source.dtypes[0])
+        destination = np.full((target.height, target.width), destination_nodata, dtype=dtype)
+        reproject(
+            source=rasterio.band(source, 1),
+            destination=destination,
+            src_transform=source.transform,
+            src_crs=source.crs,
+            src_nodata=source_nodata,
+            dst_transform=target.transform,
+            dst_crs=target.crs,
+            dst_nodata=destination_nodata,
+            resampling=Resampling.nearest,
+        )
+        profile = target.profile.copy()
+        profile.update(dtype=source.dtypes[0], count=1, nodata=destination_nodata, compress="deflate")
+        with rasterio.open(output_path, "w", **profile) as output:
+            output.write(destination, 1)
+        output_profile = _profile(output)
+    return {
+        "success": True,
+        "execution_blocked": False,
+        "reason_code": None,
+        "failed_checks": [],
+        "semantic_class": "categorical_raster_resampled",
+        "source_id": str(Path(source_path)),
+        "target_id": str(Path(target_path)),
+        "output_path": str(Path(output_path)),
+        "source_grid_id": _grid_id(source_profile),
+        "target_grid_id": _grid_id(target_profile),
+        "grid_id": _grid_id(output_profile),
+        "source": source_profile,
+        "target": target_profile,
+        "output": output_profile,
+        "resampling": "nearest",
+        "source_nodata": source_nodata,
+        "output_nodata": destination_nodata,
+        "provenance": {
+            "method": "rasterio.warp.reproject",
+            "resampling": "nearest",
+            "target_grid_source": str(Path(target_path)),
+        },
+        "limitations": [
+            "Nearest-neighbour preserves categorical codes but moves class boundaries to the target grid.",
+            "The aligned raster is a derived product and must retain this provenance with downstream statistics.",
+        ],
+    }
+
+
 def water_evidence_handler(arguments: dict, context: Any, account: Any) -> dict[str, Any]:
     """Summarize supplied 0/1 semantic water labels over common valid support."""
     rasterio, np = _rasterio_numpy()
@@ -248,6 +367,7 @@ def water_evidence_handler(arguments: dict, context: Any, account: Any) -> dict[
         "source_ids": {"before": str(Path(before_path)), "after": str(Path(after_path))},
         "crs": before_profile["crs"],
         "transform": before_profile["transform"],
+        "shape": before_profile["shape"],
         "area_method": "affine_pixel_area_with_projected_crs_unit_conversion",
         "projection_method": area["projection_method"],
         "pixel_area_m2": pixel_area_m2,
@@ -361,13 +481,13 @@ def water_by_class_handler(arguments: dict, context: Any, account: Any) -> dict[
     paths = {"after": arguments["after_path"], "classes": arguments["class_path"]}
     if arguments.get("before_path"):
         paths["before"] = arguments["before_path"]
-    classes = arguments.get("classes") or []
-    if isinstance(classes, str):
-        classes = json.loads(classes)
+    classes, class_error = _normalise_class_table(arguments.get("classes"))
+    semantic = {"semantic_class": "water_not_flood", "class_answerable": False}
+    if class_error:
+        return {**_blocked(class_error["reason_code"], details=class_error.get("details")), **semantic}
     declared = {int(entry["value"]): entry for entry in classes}
     nodata_values = {value for value, entry in declared.items() if entry.get("nodata")}
     grid = _same_grid(paths)
-    semantic = {"semantic_class": "water_not_flood", "class_answerable": False}
     if grid["failed_checks"]:
         reason = grid["failed_checks"][0]
         return {**_blocked(reason), **semantic, "failed_checks": grid["failed_checks"]}
@@ -424,8 +544,8 @@ def water_by_class_handler(arguments: dict, context: Any, account: Any) -> dict[
         rows.append(row)
     total_new = int(np.count_nonzero(new_water)) * pixel_area_m2 if new_water is not None else None
     for row in rows:
-        if total_new:
-            row["share_of_new_water"] = row["new_water_area_m2"] / total_new
+        if new_water is not None:
+            row["share_of_new_water"] = row["new_water_area_m2"] / total_new if total_new else None
     output_path = arguments.get("output_path")
     if output_path:
         # Class value where (new) water is, 0 elsewhere, 255 outside the valid support.
@@ -436,6 +556,7 @@ def water_by_class_handler(arguments: dict, context: Any, account: Any) -> dict[
         profile.update(dtype="uint8", count=1, nodata=255, compress="deflate")
         with rasterio.open(output_path, "w", **profile) as dst:
             dst.write(layer, 1)
+    max_row = max(rows, key=lambda row: row.get("new_water_area_m2", row.get("water_area_m2", 0)), default=None)
     return {
         "success": True,
         "execution_blocked": False,
@@ -446,13 +567,20 @@ def water_by_class_handler(arguments: dict, context: Any, account: Any) -> dict[
         "grid_id": grid["grid_id"],
         "crs": crs,
         "transform": transform,
+        "shape": grid["profiles"]["after"]["shape"],
+        "source_ids": paths,
         "area_method": "affine_pixel_area_with_projected_crs_unit_conversion",
         "projection_method": area["projection_method"],
         "pixel_area_m2": pixel_area_m2,
         "valid_pixels": valid_pixels,
+        "excluded_pixels": int(valid.size) - valid_pixels,
         "valid_area_m2": valid_pixels * pixel_area_m2,
         "water_area_m2": int(np.count_nonzero(after_water)) * pixel_area_m2,
         "new_water_area_m2": total_new,
+        "class_table": classes,
+        "class_count": len(rows),
+        "total_new_water_area_m2": total_new,
+        "max_new_water_class": max_row if total_new else None,
         "classes": rows,
         "output_path": output_path,
         "class_answerable": True,
@@ -519,6 +647,9 @@ def compare_with_reference_handler(arguments: dict, context: Any, account: Any) 
         "support": "common_valid_pixels",
         "grid_id": grid["grid_id"],
         "crs": crs,
+        "transform": grid["profiles"]["predicted"]["transform"],
+        "shape": grid["profiles"]["predicted"]["shape"],
+        "source_ids": paths,
         "area_method": "affine_pixel_area_with_projected_crs_unit_conversion",
         "projection_method": area["projection_method"],
         "pixel_area_m2": pixel_area_m2,
@@ -526,6 +657,7 @@ def compare_with_reference_handler(arguments: dict, context: Any, account: Any) 
         "valid_area_m2": valid_pixels * pixel_area_m2,
         "predicted_water_area_m2": (tp + fp) * pixel_area_m2,
         "reference_water_area_m2": (tp + fn) * pixel_area_m2,
+        "area_difference_m2": (fp - fn) * pixel_area_m2,
         "agreement_area_m2": tp * pixel_area_m2,
         "predicted_only_area_m2": fp * pixel_area_m2,
         "reference_only_area_m2": fn * pixel_area_m2,
@@ -574,6 +706,26 @@ def setup(registrar) -> None:
     )
     registrar.tool(
         ToolSpec(
+            slug="geo_water.align_raster",
+            name="Align Categorical Raster",
+            description="Resample one categorical raster onto a target raster grid with nearest-neighbour resampling and explicit provenance.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "source_path": {"type": "string"},
+                    "target_path": {"type": "string"},
+                    "output_path": {"type": "string"},
+                    "resampling": {"type": "string", "enum": ["nearest"], "default": "nearest"},
+                    "dst_nodata": {"type": ["number", "null"]},
+                },
+                "required": ["source_path", "target_path", "output_path"],
+            },
+            requires_connection=False,
+        ),
+        align_raster_handler,
+    )
+    registrar.tool(
+        ToolSpec(
             slug="geo_water.water_evidence",
             name="Water Label Evidence",
             description="Compute paired water-label area only after grid preflight. Inputs must be aligned semantic rasters with values 0=non-water, 1=water and nodata masked.",
@@ -616,7 +768,14 @@ def setup(registrar) -> None:
                     "after_path": {"type": "string"},
                     "before_path": {"type": "string"},
                     "class_path": {"type": "string"},
-                    "classes": {"type": "array", "items": {"type": "object"}},
+                    "classes": {
+                        "description": "Array of {value, name, optional nodata}; a value-to-label object is accepted for compatibility.",
+                        "oneOf": [
+                            {"type": "array", "items": {"type": "object", "required": ["value"]}},
+                            {"type": "object"},
+                            {"type": "string"},
+                        ],
+                    },
                     "output_path": {"type": "string"},
                 },
                 "required": ["after_path", "class_path", "classes"],

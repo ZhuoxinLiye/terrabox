@@ -9,6 +9,7 @@ import rasterio
 from rasterio.transform import from_origin
 
 from terrabox.toolkits.geo_water import (
+    align_raster_handler,
     compare_with_reference_handler,
     raster_profile_preflight_handler,
     water_by_class_handler,
@@ -289,6 +290,34 @@ class WaterByClassAndReferenceTests(unittest.TestCase):
         with rasterio.open(args["output_path"]) as src:
             self.assertEqual(src.read(1).tolist(), [[40, 40, 0], [50, 0, 0], [0, 255, 255]])
 
+    def test_class_mapping_is_normalised_and_result_has_summary_fields(self):
+        args = self._class_args([[40, 40, 40], [50, 50, 50], [40, 0, 40]])
+        args["classes"] = {"0": {"name": "no_data", "nodata": True}, "40": "耕地", "50": "建设用地"}
+        result = water_by_class_handler(args, None, None)
+        self.assertTrue(result["class_answerable"])
+        self.assertEqual(result["total_new_water_area_m2"], 300)
+        self.assertEqual(result["max_new_water_class"]["name"], "耕地")
+
+    def test_malformed_class_table_is_structured(self):
+        args = self._class_args([[40, 40, 40], [50, 50, 50], [40, 0, 40]])
+        args["classes"] = {"40": {"title": "耕地"}}
+        result = water_by_class_handler(args, None, None)
+        self.assertEqual(result["reason_code"], "invalid_class_table")
+        self.assertIn("details", result)
+
+    def test_fractional_class_code_is_rejected_without_truncation(self):
+        args = self._class_args([[40, 40, 40], [50, 50, 50], [40, 0, 40]])
+        args["classes"] = [{"value": 40.5, "name": "bad"}]
+        self.assertEqual(water_by_class_handler(args, None, None)["reason_code"], "invalid_class_table")
+
+    def test_no_new_water_has_no_maximum_or_defined_shares(self):
+        args = self._class_args([[40, 40, 40], [50, 50, 50], [40, 0, 40]])
+        args["before_path"] = args["after_path"]
+        result = water_by_class_handler(args, None, None)
+        self.assertEqual(result["total_new_water_area_m2"], 0)
+        self.assertIsNone(result["max_new_water_class"])
+        self.assertTrue(all(row["share_of_new_water"] is None for row in result["classes"]))
+
     def test_undeclared_class_value_blocks(self):
         result = water_by_class_handler(self._class_args([[40, 37, 40], [50, 50, 50], [40, 0, 40]]), None, None)
         self.assertTrue(result["execution_blocked"])
@@ -310,6 +339,17 @@ class WaterByClassAndReferenceTests(unittest.TestCase):
             "classes": self.CLASSES,
         }
         self.assertEqual(water_by_class_handler(args, None, None)["reason_code"], "unsupported_area_crs")
+
+    def test_align_raster_uses_target_grid_and_records_provenance(self):
+        source = self._write("source.tif", [[40, 50], [50, 40]], transform=from_origin(586300, 4382310, 20, 20))
+        target = self._write("target.tif", [[0] * 4 for _ in range(4)])
+        output = self.root / "aligned.tif"
+        result = align_raster_handler({"source_path": source, "target_path": target, "output_path": str(output)}, None, None)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["resampling"], "nearest")
+        self.assertEqual(result["grid_id"], result["target_grid_id"])
+        self.assertEqual(result["output"]["shape"], [4, 4])
+        self.assertEqual(result["provenance"]["target_grid_source"], target)
 
     def test_compare_with_reference(self):
         predicted = self._write("p.tif", [[1, 1, 0], [0, 1, 0], [0, 0, 255]])
