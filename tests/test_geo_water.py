@@ -12,6 +12,7 @@ from terrabox.toolkits.geo_water import (
     align_raster_handler,
     compare_with_reference_handler,
     raster_profile_preflight_handler,
+    rasterize_reference_handler,
     water_by_class_handler,
     water_evidence_handler,
     water_extent_handler,
@@ -48,6 +49,39 @@ class GeoWaterTests(unittest.TestCase):
 
     def _args(self):
         return {"before_path": str(self.before), "after_path": str(self.after)}
+
+
+    def test_reference_rasterization_reprojects_and_preserves_declared_coverage(self):
+        # Synthetic polygons, not an observed flood product.
+        import geopandas as gpd
+        from shapely.geometry import box
+        vector = self.root / "reference.gpkg"
+        gpd.GeoDataFrame(geometry=[box(500000, 4099980, 500010, 4100000)], crs="EPSG:32611").to_crs(4326).to_file(vector, engine="pyogrio")
+        result = rasterize_reference_handler({"vector_path": str(vector), "target_path": str(self.after),
+            "output_path": str(self.root / "rasterized.tif"), "coverage_bbox_wgs84": [-118, 36, -116, 38]}, None, None)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["feature_count"], 1)
+        with rasterio.open(result["output_path"]) as src:
+            np.testing.assert_array_equal(src.read(1), [[1, 0], [1, 0]])
+            self.assertEqual(src.crs.to_epsg(), 32611)
+            self.assertEqual(src.nodata, 255)
+
+    def test_reference_coverage_excludes_unmapped_cells(self):
+        import geopandas as gpd
+        from shapely.geometry import box
+        vector = self.root / "reference.gpkg"
+        gpd.GeoDataFrame(geometry=[box(22, 39, 22.02, 39.02)], crs=4326).to_file(vector, engine="pyogrio")
+        self._write(self.after, [[1, 1], [1, 1]], crs="EPSG:4326", transform=from_origin(22, 39.02, .01, .01))
+        result = rasterize_reference_handler({"vector_path": str(vector), "target_path": str(self.after),
+            "output_path": str(self.root / "coverage.tif"), "coverage_bbox_wgs84": [22, 39, 22.01, 39.02]}, None, None)
+        with rasterio.open(result["output_path"]) as src:
+            np.testing.assert_array_equal(src.read(1), [[1, 255], [1, 255]])
+        self.assertEqual(result["excluded_pixels"], 2)
+
+    def test_reference_rasterization_requires_explicit_valid_coverage(self):
+        for coverage in (None, [1, 2, 0, 3], '[NaN, 2, 3, 4]'):
+            result = rasterize_reference_handler({"coverage_bbox_wgs84": coverage}, None, None)
+            self.assertEqual(result["reason_code"], "invalid_reference_coverage")
 
     def test_preflight_accepts_matching_projected_grids(self):
         result = raster_profile_preflight_handler(self._args(), None, None)

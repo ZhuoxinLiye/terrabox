@@ -389,6 +389,71 @@ def water_evidence_handler(arguments: dict, context: Any, account: Any) -> dict[
     }
 
 
+def rasterize_reference_handler(arguments: dict, context: Any, account: Any) -> dict[str, Any]:
+    """Rasterize a polygon reference on a target grid, excluding unmapped coverage."""
+    import geopandas as gpd
+    import pyogrio
+    from rasterio.features import rasterize
+    from rasterio.warp import transform_geom
+
+    rasterio, np = _rasterio_numpy()
+    bounds = arguments.get("coverage_bbox_wgs84")
+    if isinstance(bounds, str):
+        try:
+            bounds = json.loads(bounds)
+        except ValueError:
+            return _blocked("invalid_reference_coverage")
+    if not isinstance(bounds, list) or len(bounds) != 4 or not all(isinstance(v, (int, float)) and math.isfinite(v) for v in bounds):
+        return _blocked("invalid_reference_coverage")
+    west, south, east, north = bounds
+    if not (-180 <= west < east <= 180 and -90 <= south < north <= 90):
+        return _blocked("invalid_reference_coverage")
+    vector_path, target_path, output_path = (arguments[k] for k in ("vector_path", "target_path", "output_path"))
+    layers = [str(row[0]) for row in pyogrio.list_layers(vector_path)]
+    layer = arguments.get("layer")
+    if not layer and len(layers) != 1:
+        return _blocked("ambiguous_reference_layer", layers=layers)
+    layer = layer or layers[0]
+    shapes = []
+    source = gpd.read_file(vector_path, layer=layer, engine="pyogrio")
+    with rasterio.open(target_path) as target:
+        if not target.crs or not source.crs:
+            return _blocked("missing_crs")
+        profile = target.profile.copy()
+        target_profile = _profile(target)
+        for feature in source.iterfeatures():
+            geom = feature.get("geometry")
+            if not geom or geom["type"] not in ("Polygon", "MultiPolygon"):
+                return _blocked("invalid_reference_geometry")
+            shapes.append(transform_geom(source.crs, target.crs, geom))
+        source_crs = str(source.crs)
+        coverage = {"type": "Polygon", "coordinates": [[[west, south], [east, south], [east, north], [west, north], [west, south]]]}
+        coverage = transform_geom("EPSG:4326", target.crs, coverage)
+        valid = rasterize([(coverage, 1)], out_shape=target.shape, transform=target.transform, fill=0, all_touched=False, dtype="uint8") > 0
+        if not np.any(valid):
+            return _blocked("no_reference_coverage")
+        water = rasterize([(g, 1) for g in shapes], out_shape=target.shape, transform=target.transform, fill=0, all_touched=False, dtype="uint8") if shapes else np.zeros(target.shape, dtype="uint8")
+        data = np.where(valid, water, 255).astype("uint8")
+        profile.update(count=1, dtype="uint8", nodata=255, compress="deflate")
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with rasterio.open(output_path, "w", **profile) as dst:
+            dst.write(data, 1)
+    return {
+        "success": True, "execution_blocked": False, "reason_code": None, "failed_checks": [],
+        "semantic_class": "reference_product_not_ground_truth", "output_path": output_path,
+        "grid_id": _grid_id(target_profile), "crs": target_profile["crs"],
+        "shape": target_profile["shape"], "transform": target_profile["transform"],
+        "valid_pixels": int(valid.sum()), "excluded_pixels": int(valid.size - valid.sum()),
+        "reference_water_pixels": int(np.count_nonzero(valid & (water == 1))),
+        "source_ids": {"vector": vector_path, "target": target_path}, "source_crs": source_crs,
+        "coverage_bbox_wgs84": bounds, "layer": layer, "feature_count": len(shapes),
+        "provenance": {"method": "geopandas/pyogrio + rasterio.warp.transform_geom + rasterio.features.rasterize", "all_touched": False,
+                       "coverage_rule": "pixel centre inside declared coverage; outside is nodata 255", "labels": {"0": "outside reference polygons within mapped coverage", "1": "inside reference polygons", "255": "outside mapped coverage"}},
+        "limitations": ["Reference coverage is a caller declaration; the file alone does not establish that outside polygons was observed dry.",
+                        "An older/different-date flood polygon product is not same-date water ground truth."],
+    }
+
+
 def water_extent_handler(arguments: dict, context: Any, account: Any) -> dict[str, Any]:
     """Water area of one 0/1 semantic water-label raster over its valid pixels."""
     rasterio, np = _rasterio_numpy()
@@ -684,6 +749,19 @@ def setup(registrar) -> None:
         name="geo_water",
         description="Scientific grid preflight and area statistics for semantic water-label rasters (paired or single scene, by class, against a reference).",
         version="0.1.0",
+    )
+    registrar.tool(
+        ToolSpec(
+            slug="geo_water.rasterize_reference", name="Rasterize Reference Polygons",
+            description="Rasterize an existing polygon reference onto a target raster grid. Requires its declared WGS84 mapped coverage; outside coverage becomes nodata. This preserves reference-product semantics, not ground truth.",
+            parameters={"type": "object", "properties": {
+                "vector_path": {"type": "string"}, "target_path": {"type": "string"}, "output_path": {"type": "string"},
+                "layer": {"type": "string"},
+                "coverage_bbox_wgs84": {"type": "array", "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
+                                         "description": "Declared mapped coverage [west,south,east,north] in EPSG:4326; do not infer coverage from flood polygon bounds."},
+            }, "required": ["vector_path", "target_path", "output_path", "coverage_bbox_wgs84"]},
+            requires_connection=False,
+        ), rasterize_reference_handler,
     )
     registrar.tool(
         ToolSpec(
