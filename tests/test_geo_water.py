@@ -351,6 +351,23 @@ class WaterByClassAndReferenceTests(unittest.TestCase):
         self.assertEqual(result["output"]["shape"], [4, 4])
         self.assertEqual(result["provenance"]["target_grid_source"], target)
 
+    def test_align_geographic_categories_to_projected_grid(self):
+        from rasterio.transform import from_bounds
+        from rasterio.warp import transform_bounds
+        target = self._write("utm_target.tif", [[0] * 4 for _ in range(4)])
+        with rasterio.open(target) as src:
+            bounds = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+        source = self._write("geographic_source.tif", [[40, 50], [50, 40]], crs="EPSG:4326",
+                             transform=from_bounds(*bounds, 2, 2))
+        output = str(self.root / "projected_classes.tif")
+        result = align_raster_handler({"source_path": source, "target_path": target, "output_path": output}, None, None)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["source"]["crs"], "EPSG:4326")
+        self.assertEqual(result["output"]["crs"], "EPSG:32634")
+        self.assertEqual(result["grid_id"], result["target_grid_id"])
+        with rasterio.open(output) as src:
+            self.assertEqual(set(np.unique(src.read(1)).tolist()), {40, 50})
+
     def test_compare_with_reference(self):
         predicted = self._write("p.tif", [[1, 1, 0], [0, 1, 0], [0, 0, 255]])
         reference = self._write("r.tif", [[1, 0, 1], [0, 1, 0], [0, 0, 0]])
