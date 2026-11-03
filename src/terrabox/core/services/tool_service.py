@@ -20,6 +20,25 @@ from ..utils.tool_input_coercion import coerce_tool_inputs
 from ..utils.tool_output_serialization import make_json_safe
 
 
+def explicit_result_error(result: Any) -> Optional[str]:
+    """Honor explicit tool/gate failure flags; empty results and count=0 are valid.
+
+    Only the result envelope and its immediate outputs envelope are contracts.
+    A false value inside an arbitrary observation record is not a tool failure.
+    """
+    if not isinstance(result, dict):
+        return None
+    for value in (result, result.get("outputs")):
+        if not isinstance(value, dict):
+            continue
+        if any(value.get(key) is False for key in ("success", "ok", "passed")) or value.get("execution_blocked") is True:
+            error = value.get("error") or value.get("reason_code")
+            if isinstance(error, dict):
+                error = error.get("message") or error.get("code")
+            return str(error or "Tool reported an explicit failed or blocked execution")
+    return None
+
+
 class ToolService:
     """Service for tool-related operations."""
 
@@ -271,11 +290,13 @@ class ToolService:
                     result_data = await loop.run_in_executor(None, lambda: handler(prepared_inputs, context))
 
             result_data = make_json_safe(result_data)
+            result_error = explicit_result_error(result_data)
+            tool_succeeded = result_error is None
 
             # Record tool execution
             ToolService._log_tool_execution(
                 db, user_id, tool_slug, connection, execution_id,
-                prepared_inputs, result_data, True, None, app_key
+                prepared_inputs, result_data, tool_succeeded, result_error, app_key
             )
             manifest_path = write_manifest(
                 execution_id=execution_id,
@@ -284,13 +305,15 @@ class ToolService:
                 runtime=metadata,
                 inputs=prepared_inputs,
                 outputs=result_data if isinstance(result_data, dict) else {"result": result_data},
-                status="success",
+                status="success" if tool_succeeded else "error",
+                error=result_error,
             )
             metadata["manifest_path"] = manifest_path
 
             return ExecuteResponseOut(
-                success=True,
+                success=tool_succeeded,
                 outputs=result_data,
+                error=result_error,
                 execution_id=execution_id,
                 metadata=metadata,
             )
