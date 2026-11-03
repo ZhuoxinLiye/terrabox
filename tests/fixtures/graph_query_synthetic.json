@@ -1,0 +1,18 @@
+{
+  "synthetic": true,
+  "datasetId": "n070-synthetic-boundaries",
+  "version": "synthetic-v1",
+  "description": "Explicitly synthetic unit-test annotations, not real satellite observations or original graph data.",
+  "annotations": [
+    {"id": "S-A", "level": "area", "label": "Synthetic Area A"},
+    {"id": "S-B", "level": "area", "label": "Synthetic Area B"},
+    {"id": "S-F1", "level": "facility", "label": "Twin Facility", "area": "Synthetic Area A"},
+    {"id": "S-F2", "level": "facility", "label": "Twin Facility", "area": "Synthetic Area B"},
+    {"id": "S-F3", "level": "facility", "label": "Empty Facility", "area": "Synthetic Area A"},
+    {"id": "S-T1", "level": "target", "label": "车辆区域甲", "area": "Synthetic Area A", "facility": "Twin Facility", "sourceLayer": "synthetic_layer"},
+    {"id": "S-T2", "level": "target", "label": "车辆区域乙", "area": "Synthetic Area A", "facility": "Twin Facility"},
+    {"id": "S-T3", "level": "target", "label": "办公楼", "area": "Synthetic Area A", "facility": "Twin Facility"},
+    {"id": "S-T4", "level": "target", "label": "车辆区域甲", "area": "Synthetic Area B", "facility": "Twin Facility"},
+    {"id": "S-T5", "level": "target", "label": "停机坪", "area": "Synthetic Area B", "facility": "Twin Facility"}
+  ]
+}
