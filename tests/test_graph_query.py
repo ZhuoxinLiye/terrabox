@@ -34,6 +34,17 @@ def test_legal_zero_is_success_and_never_broadens_scope():
     assert not out["truncated"] and not out["execution_blocked"]
 
 
+def test_target_level_does_not_implicitly_select_one_business_category():
+    """Regression for the actual native task's erroneous extra category filter."""
+    all_targets = call(query_nodes_handler, {"facility_id": "S-F1", "node_type": "target", "limit": 1})
+    vehicles = call(query_nodes_handler, {"facility_id": "S-F1", "node_type": "target",
+                                         "target_type_contains": "vehicle_or_equipment_area", "limit": 1})
+    assert all_targets["count"] == 3 and vehicles["count"] == 2
+    assert all_targets["filters_applied"] == {"facility_id": "S-F1", "node_type": "target"}
+    assert all_targets["returned_count"] == vehicles["returned_count"] == 1
+    assert all_targets["truncated"] and vehicles["truncated"]
+
+
 @pytest.mark.parametrize("args,code", [
     ({"facility_id": "missing"}, "invalid_scope"),
     ({"partition_id": "missing"}, "invalid_scope"),

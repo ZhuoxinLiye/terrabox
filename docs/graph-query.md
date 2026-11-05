@@ -27,3 +27,7 @@ PYTHONPATH=src /data2/liyezhuoxin/envs/terrabox-water-demo/bin/python /data2/liy
 ```
 
 共享服务重启由主agent统一执行；重启Terrabox后刷新Terraflow目录并核查三个动态组件。原生Agent任务与TerraLink联合验证分别保留证据，不能用以上CPU测试代替。
+
+## 2026-11-06 层级与业务类别说明
+
+`node_type=target` 表示目标层级，包含该层级下的所有业务类别；`target_type_contains=target` 只表示其中一个业务类别。任务要求“设施内全部目标记录”时，只传设施ID与 `node_type=target`，不得自行追加业务类别或风险条件。`limit` 只限制返回列表，不改变完整 `count`。本次仅补充工具/schema说明及该历史失败的合成回归，不改变查询算法或原始图谱。
