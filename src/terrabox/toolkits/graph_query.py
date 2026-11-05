@@ -18,9 +18,9 @@ _PROPERTIES = {
     "query_nodes": {
         "partition_id": {"type": "string", "description": "Existing area ID. Invalid IDs fail without expanding the query."},
         "facility_id": {"type": "string", "description": "Existing facility ID; selects target members within that exact area and facility."},
-        "node_type": {"type": "string", "enum": ["facility", "target"], "description": "Annotation hierarchy level, independent of target_type. target includes every business category at that level. For all target members, set node_type=target and leave target_type_contains absent."},
+        "node_type": {"type": "string", "description": "Optional annotation hierarchy level. Only facility or target are valid; other values fail core validation. Leave absent unless the task requests a level. Independent of target_type: target includes every business category at that level. For all target members, set node_type=target and leave target_type_contains absent."},
         "target_type_contains": {"type": "string", "description": "Optional business-category filter, separate from node_type. Set only when the user explicitly requests that category. One exact code from allowed_target_types; target here is one category, not all target-level records. Label keywords belong in search_graph."},
-        "risk_level": {"type": "string", "enum": ["unknown"], "description": "Existing annotations have no assessed hazard risk."},
+        "risk_level": {"type": "string", "description": "Optional risk filter. Only unknown is valid; other values fail core validation. Leave absent unless explicitly requested. Existing annotations have no assessed hazard risk."},
         "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 80},
     },
     "search_graph": {

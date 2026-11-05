@@ -31,3 +31,5 @@ PYTHONPATH=src /data2/liyezhuoxin/envs/terrabox-water-demo/bin/python /data2/liy
 ## 2026-11-06 层级与业务类别说明
 
 `node_type=target` 表示目标层级，包含该层级下的所有业务类别；`target_type_contains=target` 只表示其中一个业务类别。任务要求“设施内全部目标记录”时，只传设施ID与 `node_type=target`，不得自行追加业务类别或风险条件。`limit` 只限制返回列表，不改变完整 `count`。本次仅补充工具/schema说明及该历史失败的合成回归，不改变查询算法或原始图谱。
+
+2026-11-06后续根因修正：LFX动态组件把无默认值的可选enum生成了默认首项的下拉框，实际空白组件会收集`node_type=facility`与`risk_level=unknown`。这两个可选字段改为无默认值的string，并在说明中列合法值；真实模板改为初始空白文本字段，未填写时不进入执行参数。核心仍严格拒绝非法层级与风险值，未修改通用生成器。修前/修后实际模板与实例收集结果见Earthmind的`generated-template-before.json`和`generated-template-after.json`；这是CPU组件构建证据，原生任务另行验证。
