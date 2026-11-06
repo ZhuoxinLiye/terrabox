@@ -8,7 +8,7 @@ from ..core.registry import ToolSpec
 
 
 _COMMON = {
-    "dataset_id": {"type": "string", "description": "Optional expected dataset ID from previous tool provenance; a mismatch is an error."},
+    "dataset_id": {"type": "string", "description": "Optional dataset ID from tool provenance. A segearth:<request_id> ID selects that immutable detection snapshot; other IDs must match the configured annotation source. Never guess or substitute an ID."},
     "snapshot_id": {"type": "string", "description": "Optional expected sha256: snapshot ID to pin the evidence version across calls."},
 }
 _PROPERTIES = {
@@ -39,7 +39,7 @@ def _execute(operation: str, arguments: dict, context: Any, account: Any) -> dic
         unknown = sorted(set(arguments) - set(_PROPERTIES[operation]) - set(_COMMON))
         if unknown:
             raise GraphQueryError("unknown_arguments", "Unsupported arguments are rejected, never silently dropped.", arguments=unknown)
-        snapshot = configured_snapshot()
+        snapshot = configured_snapshot(arguments.get("dataset_id"))
         for key, actual in (("dataset_id", snapshot.dataset_id), ("snapshot_id", snapshot.provenance["snapshot_id"])):
             if key in arguments and arguments[key] != actual:
                 raise GraphQueryError("snapshot_mismatch", f"Expected {key} does not match the configured snapshot.", actual=actual)
@@ -65,13 +65,14 @@ def search_graph_handler(arguments: dict, context: Any, account: Any) -> dict[st
 
 
 def setup(registrar) -> None:
-    registrar.toolkit(name="graph_query", description="Read-only existing annotation graph: details, filtered counts and keyword lookup with snapshot provenance.", version="0.1.0")
+    registrar.toolkit(name="graph_query", description="Read-only annotation or registered model-candidate graph: details, counts and lookup with immutable snapshot provenance.", version="0.2.0")
     tools = (
         ("get_item", "Get Graph Item", "Read one graph annotation by exact ID with parents and member records. A facility/area has members; a target is a leaf. Names must first be looked up, and ambiguous names never select the first item.", ["item_id"], get_item_handler),
-        ("query_nodes", "Query Graph Nodes", "Count or filter existing graph annotations by exact area/facility IDs and hierarchy node_type. Business category target_type_contains is optional: never add it unless requested; node_type=target includes all target-level categories. count is the full matching record count; limit truncates only nodes. Zero matches is valid. Counts describe annotation records, never individual vehicles or newly detected objects.", [], query_nodes_handler),
+        ("query_nodes", "Query Graph Nodes", "Count or filter existing graph annotations by exact area/facility IDs and hierarchy node_type. Business category target_type_contains is optional: never add it unless requested; node_type=target includes all target-level categories. count is the full matching record count; limit truncates only nodes. Zero matches is valid. For the original annotation source, counts describe annotation records rather than individual vehicles.", [], query_nodes_handler),
         ("search_graph", "Search Graph", "Find candidate IDs by keyword in existing structured annotation fields. Returns matched_fields and source types. count is returned candidate count; total_matches is the full keyword match count. For a population count use query_nodes. Edge hits are hierarchy-derived links, not new observations.", ["query"], search_graph_handler),
     )
     for operation, name, description, required, handler in tools:
+        description += " A registered segearth: dataset selects model candidate regions in original image pixels; counts are not verified object counts. Use partition_id=IMAGE for the full detection image and pin snapshot_id. Model categories are exact allowed_target_types, and logits are not calibrated probabilities."
         registrar.tool(ToolSpec(slug=f"graph_query.{operation}", name=name, description=description,
                                 parameters={"type": "object", "properties": {**_PROPERTIES[operation], **_COMMON},
                                             "required": required, "additionalProperties": False},

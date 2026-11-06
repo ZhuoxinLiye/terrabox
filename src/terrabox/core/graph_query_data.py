@@ -61,16 +61,21 @@ class GraphSnapshot:
         if not isinstance(data, dict) or not isinstance(data.get("annotations"), list):
             raise GraphQueryError("unsupported_source_format", "Expected an annotations JSON snapshot.")
         self.dataset_id = str(data.get("datasetId") or data.get("dataset_id") or f"annotations:{self.sha256[:16]}")
+        detections = data.get("evidence_kind") == "model_detection_candidates"
+        self.count_unit = "model_candidate_regions" if detections else "annotation_records"
+        self.semantic_boundary = data.get("semantic_boundary", SEMANTICS) if detections else SEMANTICS
         self.provenance = {
             "dataset_id": self.dataset_id, "snapshot_sha256": self.sha256,
             "snapshot_id": f"sha256:{self.sha256}", "source_path": str(source_path),
             "source_version": data.get("version") or data.get("schemaVersion"),
             "source_format": "graph_annotations_json", "read_only": True,
             "synthetic": bool(data.get("synthetic", False)),
-            "evidence_kind": "existing_annotation_records",
-            "adapter_version": "0.1.0",
-            "category_method": "original_graph_store_label_rules_v1",
+            "evidence_kind": "model_detection_candidates" if detections else "existing_annotation_records",
+            "adapter_version": "0.2.0",
+            "category_method": "explicit_model_category" if detections else "original_graph_store_label_rules_v1",
         }
+        if detections:
+            self.provenance.update(image=data["image"], detection_provenance=data["detection_provenance"])
         self.items: dict[str, dict[str, Any]] = {}
         for index, annotation in enumerate(data["annotations"]):
             if not isinstance(annotation, dict):
@@ -90,16 +95,20 @@ class GraphSnapshot:
             self.items[item_id] = {
                 "id": item_id, "item_type": level, "label": label,
                 "node_type": level if level != "area" else None,
-                "target_type": category_for(label, level) if level != "area" else None,
+                "target_type": (annotation.get("target_type", "target") if detections else category_for(label, level)) if level != "area" else None,
                 "risk_level": "unknown", "area": annotation.get("area") or "",
                 "facility": annotation.get("facility") or "", "note": annotation.get("note") or "",
                 "source": {"annotation_id": item_id, "sourceLayer": annotation.get("sourceLayer"),
                            "snapshot_sha256": self.sha256},
                 "annotation": annotation,
             }
+            if detections:
+                self.items[item_id].update(bbox_xyxy=annotation.get("bbox_xyxy"), detection=annotation.get("detection"))
         self.partitions = [r for r in self.items.values() if r["item_type"] == "area"]
         self.nodes = [r for r in self.items.values() if r["item_type"] != "area"]
         self.allowed_categories = sorted({r["target_type"] for r in self.nodes if r["item_type"] == "target"})
+        if detections:
+            self.allowed_categories = sorted(set(self.allowed_categories) | set(data.get("allowed_categories", [])))
         for row in self.nodes:
             parents = [p["id"] for p in self.partitions if p["label"] == row["area"]]
             row["partition_id"] = parents[0] if len(parents) == 1 else None
@@ -125,8 +134,8 @@ class GraphSnapshot:
 
     def envelope(self, **result: Any) -> dict[str, Any]:
         return {"success": True, "ok": True, "execution_blocked": False,
-                "provenance": dict(self.provenance), "count_unit": "annotation_records",
-                "semantic_boundary": SEMANTICS, **result}
+                "provenance": dict(self.provenance), "count_unit": self.count_unit,
+                "semantic_boundary": self.semantic_boundary, **result}
 
     @staticmethod
     def compact(row: dict[str, Any]) -> dict[str, Any]:
@@ -246,9 +255,16 @@ def _load_snapshot(path: str, mtime_ns: int, size: int) -> GraphSnapshot:
     return GraphSnapshot(Path(path), Path(path).read_bytes())
 
 
-def configured_snapshot() -> GraphSnapshot:
+def configured_snapshot(dataset_id: str | None = None) -> GraphSnapshot:
     """The caller cannot select arbitrary files: source is server configuration only."""
     path = Path(os.environ.get("EARTHMIND_GRAPH_SOURCE", str(DEFAULT_SOURCE))).resolve()
+    if isinstance(dataset_id, str) and dataset_id.startswith("segearth:"):
+        from .segearth_bridge import registered_result
+        try:
+            result = registered_result(dataset_id)
+            path = Path(result["artifacts"]["graph_annotations.json"])
+        except (OSError, ValueError, KeyError) as exc:
+            raise GraphQueryError("detection_dataset_unavailable", "Registered detection snapshot is unavailable or has changed.") from exc
     try:
         stat = path.stat()
         return _load_snapshot(str(path), stat.st_mtime_ns, stat.st_size)
