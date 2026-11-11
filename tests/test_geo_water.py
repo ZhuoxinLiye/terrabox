@@ -153,6 +153,34 @@ class GeoWaterTests(unittest.TestCase):
         self.assertTrue(result["execution_blocked"])
         self.assertFalse(result["change_answerable"])
 
+    def test_water_evidence_rejects_any_grid_whose_areal_scale_is_off(self):
+        # Synthetic 2x2 grids. Neither projection is a Mercator variant, so a name list alone lets them through.
+        cases = {
+            # Equidistant cylindrical near 41N: grid area is about 1/cos(lat) of ground area.
+            "EPSG:4087": from_origin(2450000, 4565000, 10, 10),
+            # UTM zone 31N coordinates placed about 19 degrees east of that zone's central meridian.
+            "EPSG:32631": from_origin(2090000, 4700000, 10, 10),
+        }
+        for crs, transform in cases.items():
+            with self.subTest(crs=crs):
+                self._write(self.before, [[0, 1], [0, 0]], crs=crs, transform=transform)
+                self._write(self.after, [[1, 1], [0, 1]], crs=crs, transform=transform)
+                result = water_evidence_handler(self._args(), None, None)
+                self.assertEqual(result["reason_code"], "area_distorting_projection")
+                self.assertTrue(result["execution_blocked"])
+                self.assertFalse(result["change_answerable"])
+                self.assertNotIn("new_water_area_m2", {k for k, v in result.items() if v is not None})
+
+    def test_water_evidence_accepts_an_equal_area_grid(self):
+        # Synthetic 2x2 grid in ETRS89-LAEA Europe, an equal-area projection.
+        laea = from_origin(5400000, 2000000, 10, 10)
+        self._write(self.before, [[0, 1], [0, 0]], crs="EPSG:3035", transform=laea)
+        self._write(self.after, [[1, 1], [0, 1]], crs="EPSG:3035", transform=laea)
+        result = water_evidence_handler(self._args(), None, None)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["pixel_area_m2"], 100)
+        self.assertEqual(result["new_water_area_m2"], 200)
+
     def test_water_extent_counts_valid_pixels_only(self):
         self._write(self.after, [[1, 255], [0, 1]])
         result = water_extent_handler({"label_path": str(self.after)}, None, None)

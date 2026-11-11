@@ -120,13 +120,44 @@ _AREA_DISTORTING_METHODS = (
     "mercator",
 )
 
+# Largest accepted deviation of the projection's areal scale from 1 anywhere on
+# the raster. In-zone UTM stays within about 0.2%; Web Mercator and equidistant
+# cylindrical grids are off by tens of percent at mid latitudes.
+_MAX_AREAL_SCALE_ERROR = 0.01
 
-def _area_support(crs, transform) -> dict[str, Any]:
+
+def _areal_scale_range(projected, transform, shape) -> tuple[float, float] | None:
+    """Projection areal scale (grid area / ground area) at the raster corners and centre.
+
+    Returns None when the scale cannot be evaluated, which callers treat as unsupported.
+    """
+    from pyproj import Proj, Transformer
+
+    rows, cols = shape if shape else (0, 0)
+    pixels = {(0, 0), (cols, 0), (0, rows), (cols, rows), (cols / 2, rows / 2)}
+    try:
+        to_geographic = Transformer.from_crs(projected, projected.geodetic_crs, always_xy=True)
+        factors = Proj(projected)
+        scales = []
+        for col, row in pixels:
+            x = transform.a * col + transform.b * row + transform.c
+            y = transform.d * col + transform.e * row + transform.f
+            lon, lat = to_geographic.transform(x, y)
+            scales.append(float(factors.get_factors(lon, lat).areal_scale))
+    except Exception:  # noqa: BLE001 - any projection failure means the area cannot be vouched for
+        return None
+    if not scales or not all(math.isfinite(scale) and scale > 0 for scale in scales):
+        return None
+    return min(scales), max(scales)
+
+
+def _area_support(crs, transform, shape=None) -> dict[str, Any]:
     """Nominal per-pixel ground area, or the reason it cannot be used.
 
-    Requires a projected CRS with linear axis units and a projection that does
-    not scale area with latitude. Geographic (degree) grids are refused rather
-    than squaring an angular pixel size.
+    Requires a projected CRS with linear axis units whose areal scale stays
+    within ``_MAX_AREAL_SCALE_ERROR`` of 1 over the raster (``shape`` is
+    ``(rows, cols)``; without it only the origin is checked). Geographic
+    (degree) grids are refused rather than squaring an angular pixel size.
     """
     if crs is None or not crs.is_projected:
         return {"reason_code": "unsupported_area_crs", "crs": crs.to_string() if crs else None}
@@ -146,7 +177,15 @@ def _area_support(crs, transform) -> dict[str, Any]:
     pixel_area_m2 *= axes[0].unit_conversion_factor * axes[1].unit_conversion_factor
     if not math.isfinite(pixel_area_m2) or pixel_area_m2 <= 0:
         return {"reason_code": "invalid_pixel_area", "crs": crs.to_string(), "projection_method": method}
-    return {"reason_code": None, "crs": crs.to_string(), "projection_method": method, "pixel_area_m2": pixel_area_m2}
+    scale = _areal_scale_range(projected, transform, shape)
+    if scale is None:
+        return {"reason_code": "unsupported_area_crs", "crs": crs.to_string(), "projection_method": method}
+    if max(abs(scale[0] - 1), abs(scale[1] - 1)) > _MAX_AREAL_SCALE_ERROR:
+        return {"reason_code": "area_distorting_projection", "crs": crs.to_string(), "projection_method": method,
+                "areal_scale_min": scale[0], "areal_scale_max": scale[1],
+                "areal_scale_tolerance": _MAX_AREAL_SCALE_ERROR}
+    return {"reason_code": None, "crs": crs.to_string(), "projection_method": method, "pixel_area_m2": pixel_area_m2,
+            "areal_scale_min": scale[0], "areal_scale_max": scale[1]}
 
 
 def _same_nodata(first: list[Any], second: list[Any]) -> bool:
@@ -332,7 +371,7 @@ def water_evidence_handler(arguments: dict, context: Any, account: Any) -> dict[
                 "change_answerable": False,
             }
 
-        area = _area_support(before.crs, before.transform)
+        area = _area_support(before.crs, before.transform, before.shape)
         if area.get("reason_code"):
             return {
                 "success": False,
@@ -464,7 +503,7 @@ def water_extent_handler(arguments: dict, context: Any, account: Any) -> dict[st
         label_valid = np.isfinite(data) & np.isin(data, (0, 1))
         invalid_labels = int(np.count_nonzero(dataset_valid & ~label_valid))
         profile = _profile(src)
-        area = _area_support(src.crs, src.transform)
+        area = _area_support(src.crs, src.transform, src.shape)
     blocked = {"semantic_class": "water_not_flood", "extent_answerable": False, "crs": profile["crs"]}
     if profile["count"] != 1:
         return {**blocked, "success": False, "execution_blocked": True,
@@ -559,7 +598,7 @@ def water_by_class_handler(arguments: dict, context: Any, account: Any) -> dict[
     with rasterio.open(paths["classes"]) as src:
         class_data = src.read(1)
         class_valid = src.dataset_mask() > 0
-        area = _area_support(src.crs, src.transform)
+        area = _area_support(src.crs, src.transform, src.shape)
         crs = src.crs.to_string() if src.crs else None
         transform = list(src.transform)[:6]
     if not declared:
@@ -669,7 +708,7 @@ def compare_with_reference_handler(arguments: dict, context: Any, account: Any) 
         with rasterio.open(path) as src:
             values, label_valid, invalid = _read_labels(src, np)
             if role == "predicted":
-                area = _area_support(src.crs, src.transform)
+                area = _area_support(src.crs, src.transform, src.shape)
                 crs = src.crs.to_string() if src.crs else None
                 profile = src.profile.copy()
         if invalid:
