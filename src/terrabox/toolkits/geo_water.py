@@ -151,6 +151,28 @@ def _areal_scale_range(projected, transform, shape) -> tuple[float, float] | Non
     return min(scales), max(scales)
 
 
+def _scale_deviation(projected, lonlat_points) -> dict[str, float] | None:
+    """Range of the projection's areal and linear scale at geographic points, or None if unknown.
+
+    Linear scale covers the meridian and the parallel, so an equal-area grid that
+    stretches lengths is still caught when distances are being measured.
+    """
+    from pyproj import Proj
+
+    try:
+        factors = Proj(projected)
+        sampled = [factors.get_factors(lon, lat) for lon, lat in lonlat_points]
+        areal = [float(item.areal_scale) for item in sampled]
+        linear = [float(value) for item in sampled for value in (item.meridional_scale, item.parallel_scale)]
+    except Exception:  # noqa: BLE001 - an unevaluable projection cannot be vouched for
+        return None
+    values = areal + linear
+    if not values or not all(math.isfinite(value) and value > 0 for value in values):
+        return None
+    return {"areal_scale_min": min(areal), "areal_scale_max": max(areal),
+            "linear_scale_min": min(linear), "linear_scale_max": max(linear)}
+
+
 def _area_support(crs, transform, shape=None) -> dict[str, Any]:
     """Nominal per-pixel ground area, or the reason it cannot be used.
 
